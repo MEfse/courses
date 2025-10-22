@@ -2,7 +2,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 import seaborn as sns
 
-class BuildHist():
+class BuildHist:
     def __init__(self, series_dict):
         self.data = series_dict
         self.linewidth = 0.2
@@ -79,3 +79,10 @@ class BuildHist():
         plt.grid(True)
 
         plt.show()
+
+    def matrix_multicollinearity(self, matrix, mask):
+        plt.figure(figsize=(18, 9))
+        ax = sns.heatmap(matrix[mask], annot=True, linewidths=0.01, cmap='crest');
+        plt.grid(True)
+
+        return ax
