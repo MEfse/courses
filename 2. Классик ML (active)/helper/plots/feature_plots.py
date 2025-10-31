@@ -52,7 +52,8 @@ class BuildHist:
         sns.histplot(self.data,
                     bins='auto', 
                     linewidth=self.linewidth, 
-                    edgecolor=self.edgecolor);
+                    edgecolor=self.edgecolor, 
+                    kde=True);
 
         first_key = list(self.data.keys())[0]
 
@@ -86,3 +87,12 @@ class BuildHist:
         plt.grid(True)
 
         return ax
+
+
+    def numeric_displot(self):
+        plt.figure(figsize=(18, 4))
+        
+        sns.displot(data=self.data, kind="kde", color='r');
+        plt.xlim([self.data.min(), self.data.max()])
+
+        plt.show()
