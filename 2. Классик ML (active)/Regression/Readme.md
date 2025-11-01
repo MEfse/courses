@@ -49,7 +49,7 @@ XGBoost/LightGBM	        Hold-out	MAE	14392.4
 Catboost        	        Hold-out	MAE	13521.21
 
 
-1. Improvements
+4. Improvements
 
 Таргет log1p для линейных	…	Стабилизирует хвосты
 Импутация медианой (vs mean) для деревьев	…	Устройствость к выбросам

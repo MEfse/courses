@@ -93,13 +93,6 @@ class PipelineManager:
 
         scorer = make_scorer(mean_absolute_error, greater_is_better=False)
 
-        #if grid == True:
-            #search = GridSearchCV(pipeline, 
-                                    #cv=cv, 
-                                    #param_distributions=params, 
-                                    #n_jobs=-1, 
-                                    #scoring=scorer)
-        #else:
         search = RandomizedSearchCV(pipeline, 
                                     cv=cv, 
                                     param_distributions=params, 
@@ -348,8 +341,7 @@ class Action():
     def fill_data(self):
         data = self.data.copy()
 
-        data['Has_' + self.columns] = data[self.columns].notna().astype(int)
-        data = data.drop(columns=[self.columns], axis=1)
+        data[self.columns] = data[self.columns].fillna('No' + self.columns)
         print(f'Фича {self.columns} заполнена меткой')
         return data
 
