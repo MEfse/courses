@@ -4,7 +4,7 @@ import numpy as np
 import re
 import nltk
 from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize 
+from nltk.tokenize import WordPunctTokenizer
 
 from sklearn.dummy import DummyClassifier
 from sklearn.tree import DecisionTreeClassifier
@@ -16,18 +16,36 @@ from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
+from sklearn.base import BaseEstimator, TransformerMixin
 #from sklearn.feature_selection import 
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder, OrdinalEncoder, StandardScaler
 from sklearn.metrics import accuracy_score, classification_report
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
+import torch
+import torch.optim as optim
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from datasets import Dataset
+from transformers import DataCollatorWithPadding
+
+import os
+from gensim.models import Word2Vec
+import gensim.downloader as api
+from transformers import BertTokenizer, AutoModelForSequenceClassification
+from nltk.tokenize import WordPunctTokenizer
+
+from tqdm.notebook import tqdm
 
 import spacy # type: ignore
 from multiprocessing import Pool
 
+
+
 import logging
 
-logging.basicConfig(level=logging.INFO, filename="./data/logging.log",filemode="w",
+logging.basicConfig(level=logging.INFO, filename="./data/logging.log", filemode="w",
                     format="%(asctime)s %(levelname)s %(message)s", encoding='utf-8')
 
 nlp = spacy.load("en_core_web_sm")
@@ -74,36 +92,203 @@ class PreprocessingText:
         return result
     
 
-class PipelineManager():
-    def __init__(self, values, vectozer, model):
-        self.X_train = values[0]
-        self.y_train = values[1]
-        self.X_val = values[2]
-        self.y_val = values[3]
+class SklearnPipelineManager():
+    def __init__(self, vectozer, model):
         self.vectozer = vectozer
         self.model = model
-
-    def category_columns(self):
-        categorical_columns = self.X.select_dtypes(include=['object']).columns.to_list()
-        numeric_columns = self.X.select_dtypes(include=['int', 'float']).columns.to_list()
-
-        return categorical_columns, numeric_columns
+        self.pipe = Pipeline([('vectorizer', self.vectozer), ('clf', self.model)]) 
     
-    def create_pipeline(self):
+    def fit(self, X_train, y_train):
+        if self.pipe is None:
+            self.build_pipeline()
+        return self.pipe.fit(X_train, y_train)
+    
+    def predict(self, X_val):
+        return self.pipe.predict(X_val)
+    
+class EmbbedingsManager():
+    def __init__(self, vector_size=32, min_count=5, window=5, random_state=42):
+        self.tokenazer = WordPunctTokenizer()
+        self.vector_size = vector_size
+        self.min_count = min_count
+        self.window = window
+        self.random_state = random_state
+
+        self.w2v = None
+        self.clf = LogisticRegression(max_iter=2000)
+    
+    def tokenaze(self, X):
+        return [self.tokenazer.tokenize(str(x).lower()) for x in X]
+ 
+    def split(self, X, y):
+        X_tokens = self.tokenaze(X)
+
+        X_train, X_tmp, y_train, y_tmp = train_test_split(
+            X_tokens, y, test_size=0.4, shuffle=True, random_state=self.random_state)
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_tmp, y_tmp, test_size=0.5, shuffle=True, random_state=self.random_state)
         
-        # Создание пайплайна
-        pipe = Pipeline([
-            ('vectorizer', self.vectozer),
-            ('clf', self.model)
-        ]) 
+        return X_train, X_val, X_test, y_train, y_val, y_test
+    
+    def fit_w2v(self, X_train_tokens):
+        self.w2v = Word2Vec(
+            X_train_tokens,
+            vector_size=self.vector_size,
+            min_count=self.min_count,
+            window=self.window,
+            workers=4,
+            seed=self.random_state
+        ).wv
+        return self
+        
+    def featurize(self, X_tokens):
+        X_vectors = []
+        for tokens in X_tokens:
+            vectors = [self.w2v[token] for token in tokens if token in self.w2v]
+            
+            if len(vectors) == 0:
+                X_vectors.append(np.zeros(self.vector_size, dtype=np.float32))
+            else:
+                X_vectors.append(np.mean(vectors, axis=0))
 
-        # Обучение модели
-        pipe.fit(self.X_train, self.y_train)
+        X_vectors = np.vstack(X_vectors)
+        
+        return X_vectors
 
-        # Предсказание и получение результатов метрики
-        pred = pipe.predict(self.X_val)
-        report = classification_report(self.y_val, pred, zero_division=0)
+    
+    def fit(self, X_train_tokens, y_train):
+        if self.w2v is None:
+            self.fit_w2v(X_train_tokens)
 
-        print(report)
+        X_train_vec = self.featurize(X_train_tokens)
+        self.clf.fit(X_train_vec, y_train)
+        return self
 
-        return pipe, report
+    def predict(self, X_val_tokens):
+        X_val_vec = self.featurize(X_val_tokens)
+        pred = self.clf.predict(X_val_vec)
+        return pred
+    
+    
+class BertClassifierSimple(torch.nn.Module):
+    def __init__(self, 
+                 model_path='./models/bert',
+                 num_classes=2,
+                 batch_size=16, 
+                 max_length=128,
+                 lr=2e-5,
+                 epochs=3
+                 ):
+        super().__init__()
+
+        # Инициализация парамеров класса
+        self.model_name = 'bert-base-uncased'
+        self.model_path = model_path
+        self.num_classes = num_classes
+        self.batch_size = batch_size
+        self.max_length = max_length
+        self.lr = lr
+        self.epochs = epochs
+
+        # Инициализация cpu/gpu
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # Инициализация BERT, токеназера, оптимизатора и padding
+        self.tokenazer_bert = BertTokenizer.from_pretrained(self.model_path, local_files_only=True)
+        self.bert_model = AutoModelForSequenceClassification.from_pretrained(self.model_path, 
+                                                                local_files_only=True, num_labels=2).to(self.device)
+        self.optimizer = torch.optim.Adam(self.bert_model.parameters(), lr=2e-5)
+        self.data_collator = DataCollatorWithPadding(tokenizer=self.tokenazer_bert)
+        
+        # mixed precision (AMP)
+        #self.use_amp = True
+        #self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+
+        # Сохранение ошибок при обучении
+        self.train_losses = []
+
+    # ---utils---
+    def _to_device(self, batch):
+        return {k: v.to(self.device) for k, v in batch.items()}
+
+    def _tokenaze_map(self, batch):
+        return self.tokenazer_bert(batch['text'], 
+                                   truncation=True, 
+                                   padding=False, 
+                                   max_length=self.max_length)
+    
+    # ---data---
+    def dataloaders(self, X_train, y_train, X_val, y_val):
+        train_ds = Dataset.from_dict({'text' : X_train.tolist(), 
+                              'labels' : y_train.tolist()})
+        val_ds = Dataset.from_dict({'text' : X_val.tolist(), 
+                              'labels' : y_val.tolist()})
+        
+        train_ds = train_ds.map(self._tokenaze_map, batched=True, remove_columns=['text'])
+        val_ds = val_ds.map(self._tokenaze_map, batched=True, remove_columns=['text'])
+
+        col = ['labels', 'input_ids', 'token_type_ids', 'attention_mask']
+
+        train_ds.set_format(type='torch', columns=col)
+        val_ds.set_format(type='torch', columns=col)
+
+        train_loader = DataLoader(train_ds, shuffle=True, batch_size=self.batch_size, collate_fn=self.data_collator)
+        val_loader = DataLoader(val_ds, shuffle=False, batch_size=self.batch_size, collate_fn=self.data_collator)
+                
+        return train_loader, val_loader
+    
+    # ---train/eval---
+    def fit(self, train_loader, val_loader=None):
+        for epoch in range(1, self.epochs + 1):
+            pbar = tqdm(train_loader, desc=f'{epoch} / {self.epochs}')
+            self.bert_model.train()
+
+            for batch in pbar:
+                batch = self._to_device(batch)
+                out = self.bert_model(**batch)
+                out.loss.backward()
+
+                self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)
+                self.train_losses.append(out.loss.item())
+                pbar.set_description(f'loss : {np.mean(self.train_losses[-100:])}')
+
+
+    def evaluate(self, val_loader):
+        self.bert_model.eval()
+        eval_losses = []
+        eval_preds = []
+        eval_targets = []
+
+        for batch in tqdm(val_loader, desc="eval"):
+            batch = self._to_device(batch)
+            with torch.no_grad():
+                out = self.bert_model(**batch)
+            eval_losses.append(out.loss.item())
+            eval_preds.extend(out.logits.argmax(1).tolist())
+            eval_targets.extend(batch['labels'].tolist())
+
+            eval_loss = float(np.mean(eval_losses))
+            accuracy = (np.array(eval_preds) == np.array(eval_targets)).mean()
+
+        print(f"eval_loss={eval_loss:.4f} | accuracy={accuracy:.4f}")
+
+
+    def predict_loader(self, data_loader):
+        self.bert_model.eval()
+
+        all_preds = []
+        all_targets = []
+
+        with torch.no_grad():
+            for batch in tqdm(data_loader, desc="predict"):
+                batch = self._to_device(batch)
+                out = self.bert_model(**batch)
+
+                preds = out.logits.argmax(dim=1)
+
+                all_preds.extend(preds.cpu().numpy())
+                all_targets.extend(batch["labels"].cpu().numpy())
+
+        return np.array(all_targets), np.array(all_preds)
+
