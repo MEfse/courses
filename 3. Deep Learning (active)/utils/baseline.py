@@ -106,45 +106,57 @@ class SklearnPipelineManager():
     def predict(self, X_val):
         return self.pipe.predict(X_val)
     
-class EmbbedingsManager():
-    def __init__(self, vector_size=32, min_count=5, window=5, random_state=42):
+class EmbeddingsManager():
+    def __init__(self, 
+                 vector_size=32, 
+                 embedding_type='w2v',
+                 glove_name='glove-twitter-100',
+                 min_count=5, 
+                 window=5, 
+                 random_state=42,
+                 clf=None):
         self.tokenazer = WordPunctTokenizer()
+
+        self.embedding_type = embedding_type
+        self.glove_name = glove_name
+
         self.vector_size = vector_size
         self.min_count = min_count
         self.window = window
         self.random_state = random_state
 
-        self.w2v = None
-        self.clf = LogisticRegression(max_iter=2000)
+        self.emb = None
+        self.clf = clf if clf is not None else LogisticRegression(max_iter=2000)
     
     def tokenaze(self, X):
         return [self.tokenazer.tokenize(str(x).lower()) for x in X]
- 
-    def split(self, X, y):
-        X_tokens = self.tokenaze(X)
+     
+    def fit_embeggings(self, X_train_tokens):
+        if self.embedding_type == 'w2v':
+            self.emb = Word2Vec(
+                X_train_tokens,
+                vector_size=self.vector_size,
+                min_count=self.min_count,
+                window=self.window,
+                workers=4,
+                seed=self.random_state
+            ).wv
+            self.vector_size = self.emb.vector_size
 
-        X_train, X_tmp, y_train, y_tmp = train_test_split(
-            X_tokens, y, test_size=0.4, shuffle=True, random_state=self.random_state)
-        X_val, X_test, y_val, y_test = train_test_split(
-            X_tmp, y_tmp, test_size=0.5, shuffle=True, random_state=self.random_state)
+            return self
         
-        return X_train, X_val, X_test, y_train, y_val, y_test
-    
-    def fit_w2v(self, X_train_tokens):
-        self.w2v = Word2Vec(
-            X_train_tokens,
-            vector_size=self.vector_size,
-            min_count=self.min_count,
-            window=self.window,
-            workers=4,
-            seed=self.random_state
-        ).wv
-        return self
+        if self.embedding_type == "glove":
+            self.emb = api.load(self.glove_name)
+            self.vector_size = self.emb.vector_size
+
+            return self
+        
+        raise ValueError("Embedding_type must be 'w2v' or 'glove'")
         
     def featurize(self, X_tokens):
         X_vectors = []
         for tokens in X_tokens:
-            vectors = [self.w2v[token] for token in tokens if token in self.w2v]
+            vectors = [self.emb[token] for token in tokens if token in self.emb]
             
             if len(vectors) == 0:
                 X_vectors.append(np.zeros(self.vector_size, dtype=np.float32))
@@ -157,8 +169,8 @@ class EmbbedingsManager():
 
     
     def fit(self, X_train_tokens, y_train):
-        if self.w2v is None:
-            self.fit_w2v(X_train_tokens)
+        if self.emb is None:
+            self.fit_embeggings(X_train_tokens)
 
         X_train_vec = self.featurize(X_train_tokens)
         self.clf.fit(X_train_vec, y_train)
